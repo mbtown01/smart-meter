@@ -1,0 +1,5 @@
+meter_data.db
+__pycache__/
+*.pyc
+*.csv
+dashboard.html

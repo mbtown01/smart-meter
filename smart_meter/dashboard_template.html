@@ -1,0 +1,875 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Smart Meter Dashboard</title>
+<style>
+  :root {
+    color-scheme: light;
+    --surface-1:      #fcfcfb;
+    --page-plane:     #f9f9f7;
+    --text-primary:   #0b0b0b;
+    --text-secondary: #52514e;
+    --text-muted:     #898781;
+    --gridline:       #e1e0d9;
+    --baseline:       #c3c2b7;
+    --border:         rgba(11,11,11,0.10);
+    --series-1: #2a78d6; /* blue */
+    --series-2: #eb6834; /* orange */
+    --series-3: #1baf7a; /* aqua */
+    --series-4: #eda100; /* yellow */
+    --series-5: #e87ba4; /* magenta */
+    --series-6: #008300; /* green */
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      color-scheme: dark;
+      --surface-1:      #1a1a19;
+      --page-plane:     #0d0d0d;
+      --text-primary:   #ffffff;
+      --text-secondary: #c3c2b7;
+      --text-muted:     #898781;
+      --gridline:       #2c2c2a;
+      --baseline:       #383835;
+      --border:         rgba(255,255,255,0.10);
+      --series-1: #3987e5;
+      --series-2: #d95926;
+      --series-3: #199e70;
+      --series-4: #c98500;
+      --series-5: #d55181;
+      --series-6: #008300;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--page-plane);
+    color: var(--text-primary);
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  .wrap { max-width: 1100px; margin: 0 auto; padding: 28px 20px 60px; }
+  header { margin-bottom: 20px; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  .sub { color: var(--text-secondary); font-size: 13px; }
+
+  .unit-toggle {
+    display: inline-flex; border: 1px solid var(--border); border-radius: 8px;
+    overflow: hidden; margin-top: 14px;
+  }
+  .unit-toggle button {
+    border: none; background: var(--surface-1); color: var(--text-secondary);
+    padding: 7px 16px; font-size: 13px; cursor: pointer; font-family: inherit;
+  }
+  .unit-toggle button.active { background: var(--series-1); color: #fff; }
+
+  .stat-grid {
+    display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px;
+    margin: 20px 0 28px;
+  }
+  .stat-tile {
+    background: var(--surface-1); border: 1px solid var(--border);
+    border-radius: 10px; padding: 14px 16px;
+  }
+  .stat-tile .label { font-size: 12px; color: var(--text-secondary); }
+  .stat-tile .value { font-size: 26px; font-weight: 600; margin-top: 4px; }
+  .stat-tile .note { font-size: 11px; color: var(--text-muted); margin-top: 4px; }
+
+  .card {
+    background: var(--surface-1); border: 1px solid var(--border);
+    border-radius: 12px; padding: 18px 20px; margin-bottom: 22px;
+  }
+  .card h2 { font-size: 15px; margin: 0 0 2px; }
+  .card .desc { font-size: 12px; color: var(--text-secondary); margin-bottom: 14px; }
+  .chart-box { position: relative; height: 300px; }
+
+  .controls {
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+    margin-bottom: 14px;
+  }
+  .controls input[type=date] {
+    font-family: inherit; font-size: 13px; padding: 5px 8px;
+    border: 1px solid var(--border); border-radius: 6px;
+    background: var(--surface-1); color: var(--text-primary);
+  }
+  .controls button.add {
+    font-family: inherit; font-size: 13px; padding: 6px 12px;
+    border: 1px solid var(--border); border-radius: 6px;
+    background: var(--series-1); color: #fff; cursor: pointer;
+  }
+  .chips { display: flex; gap: 6px; flex-wrap: wrap; }
+  .chip {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-size: 12px; padding: 4px 8px 4px 6px; border-radius: 999px;
+    background: var(--page-plane); border: 1px solid var(--border);
+  }
+  .chip .swatch { width: 10px; height: 10px; border-radius: 2px; }
+  .chip button {
+    border: none; background: none; color: var(--text-muted); cursor: pointer;
+    font-size: 13px; line-height: 1; padding: 0;
+  }
+
+  details.table-toggle { margin-top: 10px; }
+  details.table-toggle summary {
+    font-size: 12px; color: var(--text-secondary); cursor: pointer;
+  }
+  table.data-table {
+    width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 12px;
+    font-variant-numeric: tabular-nums;
+  }
+  table.data-table th, table.data-table td {
+    text-align: right; padding: 4px 8px; border-bottom: 1px solid var(--gridline);
+  }
+  table.data-table th:first-child, table.data-table td:first-child { text-align: left; }
+
+  @media (max-width: 720px) {
+    .stat-grid { grid-template-columns: repeat(2, 1fr); }
+  }
+
+  .stat-grid-3 { grid-template-columns: repeat(3, 1fr); }
+
+  .week-legend { display: flex; gap: 16px; margin-bottom: 12px; }
+  .week-legend-item { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-secondary); }
+  .week-legend-item .swatch { width: 14px; height: 2px; border-radius: 1px; }
+  .week-range { font-size: 12px; color: var(--text-secondary); margin-left: 4px; }
+
+  @media (max-width: 900px) {
+    .stat-grid-3 { grid-template-columns: repeat(2, 1fr); }
+  }
+
+  .chart-box-sm { position: relative; height: 220px; }
+  .savings-note { font-size: 13px; margin-top: 10px; }
+  .savings-note strong { color: var(--text-primary); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Smart Meter Dashboard</h1>
+    <div class="sub" id="subhead"></div>
+    <div class="unit-toggle" role="group" aria-label="Units">
+      <button id="unit-kwh" class="active">kWh</button>
+      <button id="unit-cost">Cost ($)</button>
+    </div>
+  </header>
+
+  <div class="stat-grid" id="stat-grid"></div>
+
+  <div class="card">
+    <h2>Monthly summary</h2>
+    <div class="desc">Estimated all-in monthly bill (bars) and effective $/kWh (line) &mdash; the table below also has what you'd have paid with no free-night window, to show whether the TOU plan is helping.</div>
+    <div class="chart-box"><canvas id="monthlyBillChart"></canvas></div>
+    <div class="savings-note" id="monthlySavingsNote"></div>
+    <details class="table-toggle"><summary>View as table</summary><div id="monthlyTableWrap"></div></details>
+  </div>
+
+  <div class="card">
+    <h2>Usage trend (full history)</h2>
+    <div class="desc">Daily total, with a 7-day rolling average. This is the shape to watch for whether consumption is creeping up or down over time.</div>
+    <div class="chart-box"><canvas id="trendChart"></canvas></div>
+    <details class="table-toggle"><summary>View as table</summary><div id="trendTableWrap"></div></details>
+  </div>
+
+  <div class="card">
+    <h2>Day over day</h2>
+    <div class="desc">Compare the 15-minute usage curve of specific days, aligned by time of day.</div>
+    <div class="controls">
+      <input type="date" id="dayPicker">
+      <button class="add" id="dayAdd">Add day</button>
+      <div class="chips" id="dayChips"></div>
+    </div>
+    <div class="chart-box"><canvas id="dayChart"></canvas></div>
+    <details class="table-toggle"><summary>View as table</summary><div id="dayTableWrap"></div></details>
+  </div>
+
+  <div class="card">
+    <h2>Week over week</h2>
+    <div class="desc">This week vs last week, laid out across a full Mon&ndash;Sun axis.</div>
+    <div class="controls">
+      <label for="weekAnchor" style="font-size:13px;color:var(--text-secondary);">This week contains</label>
+      <input type="date" id="weekAnchor">
+      <span class="week-range" id="weekRangeLabel"></span>
+    </div>
+    <div class="week-legend" id="weekLegend"></div>
+    <div class="stat-grid stat-grid-3" id="week-stat-grid" style="margin:0 0 16px;"></div>
+    <div class="chart-box"><canvas id="weekChart"></canvas></div>
+    <details class="table-toggle"><summary>View as table</summary><div id="weekTableWrap"></div></details>
+  </div>
+
+  <div class="card">
+    <h2>Houston temperature</h2>
+    <div class="desc">Same this-week/last-week axis, hourly outdoor temperature &mdash; line it up against the usage chart above to see how much of your usage is weather-driven.</div>
+    <div class="week-legend" id="weekTempLegend"></div>
+    <div class="chart-box"><canvas id="weekTempChart"></canvas></div>
+  </div>
+
+  <div class="sub" style="margin-top:8px;">
+    Rate plan: $<span id="rateNote"></span>
+  </div>
+</div>
+
+<script src="vendor/chart.umd.min.js"></script>
+<script>
+const DATA = __DATA_JSON__;
+const SLOTS = ['--series-1','--series-2','--series-3','--series-4','--series-5','--series-6'];
+const WEEKDAY_LABELS = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
+
+function cssVar(name) {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+}
+function slotColor(i) { return cssVar(SLOTS[i % SLOTS.length]); }
+function muted() { return cssVar('--text-muted'); }
+function secondary() { return cssVar('--text-secondary'); }
+function gridline() { return cssVar('--gridline'); }
+function surface() { return cssVar('--surface-1'); }
+
+let unit = 'kwh'; // or 'cost'
+function val(entry) { return unit === 'kwh' ? entry.kwh : entry.cost; }
+function fmt(v) {
+  if (unit === 'kwh') return v.toFixed(1) + ' kWh';
+  return (v < 0 ? '-$' : '$') + Math.abs(v).toFixed(2);
+}
+function fmtShort(v) {
+  if (unit === 'kwh') return v.toFixed(1);
+  return (v < 0 ? '-$' : '$') + Math.abs(v).toFixed(2);
+}
+function minutesToHHMM(m) {
+  const h = Math.floor(m / 60), mm = m % 60;
+  return String(h).padStart(2,'0') + ':' + String(mm).padStart(2,'0');
+}
+function unitAxisLabel() { return unit === 'kwh' ? 'kWh' : 'Cost ($)'; }
+
+Chart.defaults.font.family = "system-ui, -apple-system, 'Segoe UI', sans-serif";
+Chart.defaults.color = muted();
+Chart.defaults.borderColor = gridline();
+Chart.defaults.plugins.legend.labels.usePointStyle = true;
+Chart.defaults.plugins.legend.labels.pointStyle = 'line';
+
+// ---- Header / stats ----
+function renderHeader() {
+  const d = DATA.daily;
+  const range = d.length ? `${d[0].d} to ${d[d.length-1].d}` : 'no data';
+  document.getElementById('subhead').textContent =
+    `${d.length} days of interval data (${range}). Generated ${DATA.generatedAt}.`;
+  const c = DATA.config;
+  document.getElementById('rateNote').textContent =
+    `${c.energyRateDay}/kWh (${c.freeStart}-${c.freeEnd} free) + TDU ~$${c.tdurate}/kWh, ` +
+    `$${c.baseMonthlyCharge}/mo base, ~${(c.taxRatePct*100).toFixed(2)}% taxes/fees on top of usage-based charges.`;
+}
+
+function renderStats() {
+  const s = DATA.stats;
+  const grid = document.getElementById('stat-grid');
+  grid.innerHTML = '';
+  const tiles = unit === 'kwh' ? [
+    ['Last 30 days usage', s.totalKwh.toFixed(1) + ' kWh', ''],
+    ['Avg daily usage', s.avgDailyKwh.toFixed(1) + ' kWh/day', ''],
+    ['Free (night) share', s.nightSharePct.toFixed(1) + '%', '11pm-6am, last 30 days'],
+    ['Window', s.windowDays + ' days', 'most recent available'],
+  ] : [
+    ['Last 30 days usage-based cost', '$' + s.totalCost.toFixed(2), 'excludes $' + DATA.config.baseMonthlyCharge + ' base charge & taxes'],
+    ['Avg daily cost', '$' + (s.totalCost / s.windowDays).toFixed(2) + '/day', ''],
+    ['Free (night) share', s.nightSharePct.toFixed(1) + '%', 'kWh consumed free, last 30 days'],
+    ['Window', s.windowDays + ' days', 'most recent available'],
+  ];
+  for (const [label, value, note] of tiles) {
+    const el = document.createElement('div');
+    el.className = 'stat-tile';
+    const noteHtml = note ? `<div class="note"></div>` : '';
+    el.innerHTML = `<div class="label"></div><div class="value"></div>${noteHtml}`;
+    el.querySelector('.label').textContent = label;
+    el.querySelector('.value').textContent = value;
+    if (note) el.querySelector('.note').textContent = note;
+    grid.appendChild(el);
+  }
+}
+
+// ---- Trend chart ----
+let trendChart;
+function rollingAvg(arr, w) {
+  const out = [];
+  let sum = 0;
+  for (let i = 0; i < arr.length; i++) {
+    sum += arr[i];
+    if (i >= w) sum -= arr[i-w];
+    const n = Math.min(i+1, w);
+    out.push(sum / n);
+  }
+  return out;
+}
+function renderTrend() {
+  const daily = DATA.daily;
+  const labels = daily.map(e => e.d);
+  const raw = daily.map(val);
+  const avg = rollingAvg(raw, 7);
+
+  if (trendChart) trendChart.destroy();
+  trendChart = new Chart(document.getElementById('trendChart'), {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [
+        {
+          label: 'Daily',
+          data: raw,
+          borderColor: secondary(),
+          borderWidth: 1,
+          pointRadius: 0,
+          tension: 0,
+        },
+        {
+          label: '7-day avg',
+          data: avg,
+          borderColor: slotColor(0),
+          borderWidth: 2,
+          pointRadius: 0,
+          tension: 0.15,
+        },
+      ],
+    },
+    options: {
+      animation: false,
+      maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { position: 'top', align: 'end' },
+        tooltip: {
+          callbacks: {
+            label: (ctx) => ` ${ctx.dataset.label}: ${fmt(ctx.parsed.y)}`,
+          },
+        },
+      },
+      scales: {
+        x: { ticks: { maxTicksLimit: 10, color: muted() }, grid: { display: false } },
+        y: {
+          title: { display: true, text: unitAxisLabel(), color: muted() },
+          ticks: { color: muted(), callback: (v) => fmtShort(v) },
+          grid: { color: gridline() },
+        },
+      },
+    },
+  });
+
+  const wrap = document.getElementById('trendTableWrap');
+  wrap.innerHTML = '';
+  const table = document.createElement('table');
+  table.className = 'data-table';
+  const thead = document.createElement('tr');
+  ['Date', unit === 'kwh' ? 'kWh' : 'Cost'].forEach(h => {
+    const th = document.createElement('th'); th.textContent = h; thead.appendChild(th);
+  });
+  table.appendChild(thead);
+  daily.forEach(e => {
+    const tr = document.createElement('tr');
+    const td1 = document.createElement('td'); td1.textContent = e.d;
+    const td2 = document.createElement('td'); td2.textContent = fmtShort(val(e));
+    tr.appendChild(td1); tr.appendChild(td2);
+    table.appendChild(tr);
+  });
+  wrap.appendChild(table);
+}
+
+// ---- Day over day ----
+let dayChart;
+const allDates = DATA.daily.map(e => e.d);
+let selectedDays = allDates.slice(-2);
+
+function renderDayChips() {
+  const wrap = document.getElementById('dayChips');
+  wrap.innerHTML = '';
+  selectedDays.forEach((d, i) => {
+    const chip = document.createElement('div');
+    chip.className = 'chip';
+    const sw = document.createElement('span');
+    sw.className = 'swatch';
+    sw.style.background = slotColor(i);
+    const label = document.createElement('span');
+    label.textContent = d;
+    const btn = document.createElement('button');
+    btn.textContent = '×';
+    btn.setAttribute('aria-label', 'Remove ' + d);
+    btn.onclick = () => { selectedDays = selectedDays.filter(x => x !== d); renderDay(); };
+    chip.appendChild(sw); chip.appendChild(label); chip.appendChild(btn);
+    wrap.appendChild(chip);
+  });
+}
+
+function renderDay() {
+  renderDayChips();
+  const datasets = selectedDays.map((d, i) => {
+    const points = (DATA.intervals[d] || []).map(([mins, kwh, cost]) => ({
+      x: mins, y: unit === 'kwh' ? kwh : cost,
+    }));
+    return {
+      label: d,
+      data: points,
+      borderColor: slotColor(i),
+      borderWidth: 2,
+      pointRadius: 0,
+      tension: 0.1,
+    };
+  });
+
+  if (dayChart) dayChart.destroy();
+  dayChart = new Chart(document.getElementById('dayChart'), {
+    type: 'line',
+    data: { datasets },
+    options: {
+      animation: false,
+      maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { position: 'top', align: 'end' },
+        tooltip: {
+          callbacks: {
+            title: (items) => items.length ? minutesToHHMM(items[0].parsed.x) : '',
+            label: (ctx) => ` ${ctx.dataset.label}: ${fmt(ctx.parsed.y)}`,
+          },
+        },
+      },
+      scales: {
+        x: {
+          type: 'linear', min: 0, max: 1439,
+          afterBuildTicks: (axis) => {
+            axis.ticks = [0, 180, 360, 540, 720, 900, 1080, 1260, 1439].map((v) => ({ value: v }));
+          },
+          ticks: {
+            color: muted(),
+            callback: (v) => minutesToHHMM(v),
+          },
+          grid: { display: false },
+        },
+        y: {
+          title: { display: true, text: unitAxisLabel(), color: muted() },
+          ticks: { color: muted(), callback: (v) => fmtShort(v) },
+          grid: { color: gridline() },
+        },
+      },
+    },
+  });
+
+  const wrap = document.getElementById('dayTableWrap');
+  wrap.innerHTML = '';
+  const table = document.createElement('table');
+  table.className = 'data-table';
+  const thead = document.createElement('tr');
+  const th0 = document.createElement('th'); th0.textContent = 'Time'; thead.appendChild(th0);
+  selectedDays.forEach(d => { const th = document.createElement('th'); th.textContent = d; thead.appendChild(th); });
+  table.appendChild(thead);
+  const timeSet = new Set();
+  selectedDays.forEach(d => (DATA.intervals[d] || []).forEach(([mins]) => timeSet.add(mins)));
+  Array.from(timeSet).sort((a,b) => a-b).forEach(mins => {
+    const tr = document.createElement('tr');
+    const td0 = document.createElement('td'); td0.textContent = minutesToHHMM(mins); tr.appendChild(td0);
+    selectedDays.forEach(d => {
+      const row = (DATA.intervals[d] || []).find(r => r[0] === mins);
+      const td = document.createElement('td');
+      td.textContent = row ? fmtShort(unit === 'kwh' ? row[1] : row[2]) : '';
+      tr.appendChild(td);
+    });
+    table.appendChild(tr);
+  });
+  wrap.appendChild(table);
+}
+
+// ---- Week over week ----
+const dailyByDate = {};
+DATA.daily.forEach(e => { dailyByDate[e.d] = e; });
+
+function addDaysISO(iso, n) {
+  const d = new Date(iso + 'T00:00:00');
+  d.setDate(d.getDate() + n);
+  return d.toISOString().slice(0, 10);
+}
+function mondayOf(iso) {
+  const d = new Date(iso + 'T00:00:00');
+  const wd = (d.getDay() + 6) % 7; // Monday=0
+  d.setDate(d.getDate() - wd);
+  return d.toISOString().slice(0, 10);
+}
+function fmtDateShort(iso) {
+  const d = new Date(iso + 'T00:00:00');
+  return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+}
+
+const fullWeekStarts = Object.keys(DATA.weeks).filter(w => DATA.weeks[w].length === 7).sort();
+let weekAnchorDate = fullWeekStarts.length
+  ? fullWeekStarts[fullWeekStarts.length - 1]
+  : (allDates.length ? mondayOf(allDates[allDates.length - 1]) : null);
+
+let weekChart, weekTempChart;
+
+function buildWeekSeries(dates, useTemp) {
+  const points = [];
+  for (let wd = 0; wd < 7; wd++) {
+    const source = useTemp ? (DATA.weather[dates[wd]] || []) : (DATA.intervals[dates[wd]] || []);
+    source.forEach((row) => {
+      const value = useTemp ? row[1] : (unit === 'kwh' ? row[1] : row[2]);
+      points.push({ x: wd * 1440 + row[0], y: value });
+    });
+  }
+  return points;
+}
+function weekAxisTickCallback(v) { return WEEKDAY_LABELS[Math.floor(v / 1440)] ?? ''; }
+function weekAxisTooltipTitle(items) {
+  if (!items.length) return '';
+  const v = items[0].parsed.x;
+  const wd = Math.floor(v / 1440);
+  return `${WEEKDAY_LABELS[wd] ?? ''} ${minutesToHHMM(v - wd * 1440)}`;
+}
+function renderWeekLegend(elId) {
+  const legend = document.getElementById(elId);
+  legend.innerHTML = '';
+  [['This week', slotColor(0)], ['Last week', slotColor(1)]].forEach(([label, color]) => {
+    const item = document.createElement('span');
+    item.className = 'week-legend-item';
+    const sw = document.createElement('span'); sw.className = 'swatch'; sw.style.background = color;
+    const txt = document.createElement('span'); txt.textContent = label;
+    item.appendChild(sw); item.appendChild(txt);
+    legend.appendChild(item);
+  });
+}
+
+function deltaHtml(delta, pct) {
+  if (delta === 0 || !isFinite(pct)) return `<span style="color:var(--text-secondary);">no change</span>`;
+  const good = delta <= 0; // less usage/cost is the desirable direction
+  const color = good ? '#0ca30c' : '#d03b3b';
+  const arrow = delta > 0 ? '↑' : '↓';
+  return `<span style="color:${color};font-weight:600;">${arrow} ${Math.abs(pct).toFixed(1)}%</span>`;
+}
+
+function renderWeek() {
+  if (!weekAnchorDate) return;
+  const thisStart = mondayOf(weekAnchorDate);
+  const lastStart = addDaysISO(thisStart, -7);
+  const thisDates = Array.from({ length: 7 }, (_, i) => addDaysISO(thisStart, i));
+  const lastDates = Array.from({ length: 7 }, (_, i) => addDaysISO(lastStart, i));
+
+  document.getElementById('weekRangeLabel').textContent =
+    `This week: ${fmtDateShort(thisStart)}–${fmtDateShort(thisDates[6])}  ·  Last week: ${fmtDateShort(lastStart)}–${fmtDateShort(lastDates[6])}`;
+
+  renderWeekLegend('weekLegend');
+  renderWeekLegend('weekTempLegend');
+
+  function weekTotals(dates) {
+    let kwh = 0, cost = 0;
+    dates.forEach(d => { const e = dailyByDate[d]; if (e) { kwh += e.kwh; cost += e.cost; } });
+    return { kwh, cost };
+  }
+  const thisTot = weekTotals(thisDates);
+  const lastTot = weekTotals(lastDates);
+  const kwhDelta = thisTot.kwh - lastTot.kwh;
+  const kwhDeltaPct = lastTot.kwh ? (kwhDelta / lastTot.kwh * 100) : 0;
+  const costDelta = thisTot.cost - lastTot.cost;
+  const costDeltaPct = lastTot.cost ? (costDelta / lastTot.cost * 100) : 0;
+
+  let biggestDay = null, biggestDelta = 0;
+  for (let wd = 0; wd < 7; wd++) {
+    const te = dailyByDate[thisDates[wd]], le = dailyByDate[lastDates[wd]];
+    if (te && le) {
+      const d = te.kwh - le.kwh;
+      if (Math.abs(d) > Math.abs(biggestDelta)) { biggestDelta = d; biggestDay = wd; }
+    }
+  }
+
+  const statGrid = document.getElementById('week-stat-grid');
+  statGrid.innerHTML = '';
+  const tiles = [
+    ['This week usage', thisTot.kwh.toFixed(1) + ' kWh', `vs last week: ${deltaHtml(kwhDelta, kwhDeltaPct)}`],
+    ['This week cost', '$' + thisTot.cost.toFixed(2), `vs last week: ${deltaHtml(costDelta, costDeltaPct)}`],
+    ['Biggest change day', biggestDay !== null ? WEEKDAY_LABELS[biggestDay] : '–',
+      biggestDay !== null
+        ? `${biggestDelta > 0 ? '+' : ''}${biggestDelta.toFixed(1)} kWh vs last week`
+        : 'not enough data'],
+  ];
+  tiles.forEach(([label, value, noteHtml]) => {
+    const el = document.createElement('div');
+    el.className = 'stat-tile';
+    el.innerHTML = `<div class="label"></div><div class="value"></div><div class="note"></div>`;
+    el.querySelector('.label').textContent = label;
+    el.querySelector('.value').textContent = value;
+    el.querySelector('.note').innerHTML = noteHtml;
+    statGrid.appendChild(el);
+  });
+
+  function makeWeekAxis() {
+    return {
+      type: 'linear', min: 0, max: 10080,
+      afterBuildTicks: (axis) => {
+        axis.ticks = [0, 1440, 2880, 4320, 5760, 7200, 8640, 10080].map((v) => ({ value: v }));
+      },
+      ticks: { color: muted(), callback: weekAxisTickCallback },
+      grid: { color: gridline() },
+    };
+  }
+
+  if (weekChart) weekChart.destroy();
+  weekChart = new Chart(document.getElementById('weekChart'), {
+    type: 'line',
+    data: {
+      datasets: [
+        { label: 'This week', data: buildWeekSeries(thisDates, false), borderColor: slotColor(0), borderWidth: 2, pointRadius: 0, tension: 0.1 },
+        { label: 'Last week', data: buildWeekSeries(lastDates, false), borderColor: slotColor(1), borderWidth: 2, pointRadius: 0, tension: 0.1 },
+      ],
+    },
+    options: {
+      animation: false,
+      maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            title: weekAxisTooltipTitle,
+            label: (ctx) => ` ${ctx.dataset.label}: ${fmt(ctx.parsed.y)}`,
+          },
+        },
+      },
+      scales: {
+        x: makeWeekAxis(),
+        y: {
+          title: { display: true, text: unitAxisLabel(), color: muted() },
+          ticks: { color: muted(), callback: (v) => fmtShort(v) },
+          grid: { color: gridline() },
+        },
+      },
+    },
+  });
+
+  if (weekTempChart) weekTempChart.destroy();
+  weekTempChart = new Chart(document.getElementById('weekTempChart'), {
+    type: 'line',
+    data: {
+      datasets: [
+        { label: 'This week', data: buildWeekSeries(thisDates, true), borderColor: slotColor(0), borderWidth: 2, pointRadius: 0, tension: 0.2 },
+        { label: 'Last week', data: buildWeekSeries(lastDates, true), borderColor: slotColor(1), borderWidth: 2, pointRadius: 0, tension: 0.2 },
+      ],
+    },
+    options: {
+      animation: false,
+      maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            title: weekAxisTooltipTitle,
+            label: (ctx) => ` ${ctx.dataset.label}: ${ctx.parsed.y.toFixed(0)}°F`,
+          },
+        },
+      },
+      scales: {
+        x: makeWeekAxis(),
+        y: {
+          title: { display: true, text: 'Temperature (°F)', color: muted() },
+          ticks: { color: muted(), callback: (v) => v + '°' },
+          grid: { color: gridline() },
+        },
+      },
+    },
+  });
+
+  const wrap = document.getElementById('weekTableWrap');
+  wrap.innerHTML = '';
+  const table = document.createElement('table');
+  table.className = 'data-table';
+  const thead = document.createElement('tr');
+  ['Day', 'This week', 'Last week', 'Δ'].forEach(h => {
+    const th = document.createElement('th'); th.textContent = h; thead.appendChild(th);
+  });
+  table.appendChild(thead);
+  for (let wd = 0; wd < 7; wd++) {
+    const te = dailyByDate[thisDates[wd]], le = dailyByDate[lastDates[wd]];
+    const tr = document.createElement('tr');
+    [
+      WEEKDAY_LABELS[wd],
+      te ? fmtShort(val(te)) : '',
+      le ? fmtShort(val(le)) : '',
+      (te && le) ? fmtShort(val(te) - val(le)) : '',
+    ].forEach(t => { const td = document.createElement('td'); td.textContent = t; tr.appendChild(td); });
+    table.appendChild(tr);
+  }
+  wrap.appendChild(table);
+}
+
+// ---- Monthly summary ----
+let monthlyBillChart;
+function fmtMonthLabel(ym) {
+  const [y, m] = ym.split('-').map(Number);
+  return new Date(y, m - 1, 1).toLocaleDateString(undefined, { month: 'short', year: '2-digit' });
+}
+function withAlpha(hex, a) {
+  const r = parseInt(hex.slice(1, 3), 16), g = parseInt(hex.slice(3, 5), 16), b = parseInt(hex.slice(5, 7), 16);
+  return `rgba(${r},${g},${b},${a})`;
+}
+
+function renderMonthly() {
+  const months = DATA.monthly;
+  const labels = months.map(m => fmtMonthLabel(m.ym));
+  const billColors = months.map(m => withAlpha(slotColor(0), m.partial ? 0.45 : 1));
+  const barLabel = unit === 'kwh' ? 'Monthly usage' : 'Estimated bill';
+  const barUnitLabel = unit === 'kwh' ? 'kWh' : 'Estimated bill ($)';
+
+  if (monthlyBillChart) monthlyBillChart.destroy();
+  monthlyBillChart = new Chart(document.getElementById('monthlyBillChart'), {
+    data: {
+      labels,
+      datasets: [
+        {
+          type: 'bar',
+          label: barLabel,
+          data: months.map(m => unit === 'kwh' ? m.kwh : m.billEstimate),
+          backgroundColor: billColors,
+          borderRadius: 4,
+          maxBarThickness: 24,
+          yAxisID: 'y',
+          order: 2,
+        },
+        {
+          type: 'line',
+          label: 'Effective rate',
+          data: months.map(m => m.effectiveRate),
+          borderColor: slotColor(1),
+          borderWidth: 2,
+          pointRadius: 4,
+          pointBackgroundColor: slotColor(1),
+          pointBorderColor: surface(),
+          pointBorderWidth: 2,
+          tension: 0.15,
+          yAxisID: 'y1',
+          order: 1,
+        },
+      ],
+    },
+    options: {
+      animation: false,
+      maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { position: 'top', align: 'end' },
+        tooltip: {
+          callbacks: {
+            label: (ctx) => {
+              if (ctx.dataset.yAxisID === 'y1') {
+                return ` Effective rate: $${ctx.parsed.y.toFixed(3)}/kWh`;
+              }
+              const m = months[ctx.dataIndex];
+              const base = unit === 'kwh' ? `${m.kwh.toFixed(1)} kWh` : `$${m.billEstimate.toFixed(2)}`;
+              return m.partial ? ` ${barLabel}: ${base} (partial: ${m.daysPresent}/${m.daysInMonth} days)` : ` ${barLabel}: ${base}`;
+            },
+          },
+        },
+      },
+      scales: {
+        x: { ticks: { color: muted() }, grid: { display: false } },
+        y: {
+          position: 'left',
+          title: { display: true, text: barUnitLabel, color: muted() },
+          ticks: { color: muted(), callback: (v) => unit === 'kwh' ? v.toFixed(0) : '$' + v.toFixed(0) },
+          grid: { color: gridline() },
+        },
+        y1: {
+          position: 'right',
+          title: { display: true, text: 'Effective rate ($/kWh)', color: muted() },
+          ticks: { color: muted(), callback: (v) => '$' + v.toFixed(2) },
+          grid: { display: false },
+        },
+      },
+    },
+  });
+
+  const totalSavings = months.reduce((s, m) => s + m.savingsEstimate, 0);
+  const fullMonths = months.filter(m => !m.partial).length;
+  let bestMonth = months[0];
+  months.forEach(m => { if (m.savingsEstimate > bestMonth.savingsEstimate) bestMonth = m; });
+  document.getElementById('monthlySavingsNote').innerHTML =
+    `Estimated total saved by the free-night window across ${months.length} months (${fullMonths} full): ` +
+    `<strong>$${totalSavings.toFixed(2)}</strong>. Biggest single-month benefit: ` +
+    `<strong>${fmtMonthLabel(bestMonth.ym)}</strong> ($${bestMonth.savingsEstimate.toFixed(2)}).`;
+
+  const wrap = document.getElementById('monthlyTableWrap');
+  wrap.innerHTML = '';
+  const table = document.createElement('table');
+  table.className = 'data-table';
+  const thead = document.createElement('tr');
+  ['Month', 'kWh', 'Bill est.', 'Effective rate', 'If no free nights', 'Savings'].forEach(h => {
+    const th = document.createElement('th'); th.textContent = h; thead.appendChild(th);
+  });
+  table.appendChild(thead);
+  months.forEach(m => {
+    const tr = document.createElement('tr');
+    [
+      fmtMonthLabel(m.ym) + (m.partial ? ' *' : ''),
+      m.kwh.toFixed(1),
+      '$' + m.billEstimate.toFixed(2),
+      '$' + m.effectiveRate.toFixed(3) + '/kWh',
+      '$' + m.hypotheticalEffectiveRate.toFixed(3) + '/kWh',
+      '$' + m.savingsEstimate.toFixed(2),
+    ].forEach(t => { const td = document.createElement('td'); td.textContent = t; tr.appendChild(td); });
+    table.appendChild(tr);
+  });
+  wrap.appendChild(table);
+  if (months.some(m => m.partial)) {
+    const note = document.createElement('div');
+    note.className = 'sub';
+    note.style.marginTop = '6px';
+    note.textContent = '* partial month (fewer days of data than the full calendar month)';
+    wrap.appendChild(note);
+  }
+}
+
+// ---- Controls ----
+document.getElementById('dayAdd').onclick = () => {
+  const v = document.getElementById('dayPicker').value;
+  if (v && !selectedDays.includes(v) && DATA.intervals[v] && selectedDays.length < 6) {
+    selectedDays.push(v);
+    selectedDays.sort();
+    renderDay();
+  }
+};
+document.getElementById('weekAnchor').onchange = () => {
+  const v = document.getElementById('weekAnchor').value;
+  if (v) { weekAnchorDate = v; renderWeek(); }
+};
+
+function renderAll() {
+  renderStats();
+  renderMonthly();
+  renderTrend();
+  renderDay();
+  renderWeek();
+}
+
+document.getElementById('unit-kwh').onclick = () => {
+  unit = 'kwh';
+  document.getElementById('unit-kwh').classList.add('active');
+  document.getElementById('unit-cost').classList.remove('active');
+  renderAll();
+};
+document.getElementById('unit-cost').onclick = () => {
+  unit = 'cost';
+  document.getElementById('unit-cost').classList.add('active');
+  document.getElementById('unit-kwh').classList.remove('active');
+  renderAll();
+};
+
+if (allDates.length) {
+  document.getElementById('dayPicker').min = allDates[0];
+  document.getElementById('dayPicker').max = allDates[allDates.length - 1];
+  document.getElementById('dayPicker').value = allDates[allDates.length - 1];
+}
+if (allDates.length) {
+  document.getElementById('weekAnchor').min = allDates[0];
+  document.getElementById('weekAnchor').max = allDates[allDates.length - 1];
+}
+if (weekAnchorDate) {
+  document.getElementById('weekAnchor').value = weekAnchorDate;
+}
+
+renderHeader();
+renderAll();
+
+window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', renderAll);
+</script>
+</body>
+</html>
