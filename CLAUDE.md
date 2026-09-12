@@ -50,14 +50,27 @@ HTML file. There is no server and no API; `dashboard.html` is a finished
 artifact, not a template rendered per-request.
 
 - `config.py` — the single source of truth for the rate plan (TOU energy
-  rate, free-period window, ERCOT securitization rate, TDU $/kWh, base
-  monthly charge, blended tax %). All cost math reads from here; nothing
-  is hardcoded elsewhere. When the user's plan changes, this is the only
-  file that should need editing.
+  rate, free-period window + rate, ERCOT securitization rate, TDU rate
+  schedule, base monthly charge, blended tax %). All cost math reads from
+  here; nothing is hardcoded elsewhere. When the user's plan changes, this
+  is the only file that should need editing.
+  - `TDU_RATE_SCHEDULE` is a list of `(effective_date, fixed_monthly,
+    rate_per_kwh)` tuples, sorted ascending — TDU rates change occasionally
+    (per the user, "once or twice a year"), not every billing cycle, so
+    each interval/window looks up whichever entry was in effect on its
+    date rather than applying one global constant. The first entry's date
+    must predate all usage data (a `2000-01-01` sentinel does this).
+    Adding a rate change means appending a new tuple, not editing existing
+    ones — old windows should keep resolving to the old rate.
 - `smart_meter/cost.py` — pure functions computing per-interval cost from
   `config.py` values. `is_free_period()` handles TOU windows that wrap past
-  midnight. This is intentionally decoupled from SQLite/CSV so the cost
+  midnight. `tdu_rate_for_date()` bisects `TDU_RATE_SCHEDULE` (via a
+  pre-sorted module-level list) to find the rate in effect on a given
+  `usage_date`. This is intentionally decoupled from SQLite/CSV so the cost
   model can be unit-reasoned about independently.
+  `monthly_bill_estimate(variable_cost_sum, tdu_fixed_monthly)` takes the
+  TDU fixed charge as a parameter (not a constant) since it's now
+  date-dependent — callers look it up via `tdu_rate_for_date()` first.
 - `smart_meter/db.py` — schema only (`intervals` table + indexes). One
   table, no migrations — schema changes mean editing `SCHEMA` and doing a
   fresh `build_dashboard.py` run (full reload handles it).
@@ -80,21 +93,95 @@ artifact, not a template rendered per-request.
   (`daily`, `intervals` keyed by date, `weeks` keyed by Monday date,
   `weather` keyed by date [hourly, minutes-since-midnight x-values so it
   overlays directly on the intervals axis], `monthly` [one row per
-  calendar month]), and does a single string-replace of `__DATA_JSON__`
-  into `dashboard_template.html`. Uses placeholder-token replacement
-  rather than f-strings/`.format()` specifically to avoid brace-escaping
-  collisions with the embedded CSS/JS.
-  - `build_monthly()` also computes a **hypothetical no-free-nights bill**
-    per month (same kWh, same TDU/base/tax, but the night kWh that was
-    free gets charged back at `ENERGY_RATE_DAY`) so the dashboard can show
-    the TOU plan's actual dollar benefit per month, not just the rate. If
-    the free-period logic in `cost.py` changes, update this alongside it
-    — it's a parallel calculation, not a call into `cost.py`.
-  - Months are marked `partial` when `daysPresent < daysInMonth` (via
-    `calendar.monthrange`) — the frontend renders those bars at reduced
-    opacity and flags them in tooltips/table rather than hiding them,
-    since a partial month's bill/kWh would otherwise mislead by comparison
-    to full months.
+  **billing window**, see below]), and does a single string-replace of
+  `__DATA_JSON__` into `dashboard_template.html`. Uses placeholder-token
+  replacement rather than f-strings/`.format()` specifically to avoid
+  brace-escaping collisions with the embedded CSS/JS.
+  - **Billing windows, not calendar months.** `build_billing_windows()`
+    (the `monthly` key in the JSON is still named that for frontend
+    simplicity, but it is *not* calendar-month grouping) buckets days
+    using window-start dates from `_resolve_window_start(n)`, which checks
+    `config.KNOWN_BILLING_WINDOW_STARTS` (a `"YYYY-MM" -> date` dict of
+    confirmed boundaries straight from real bills) **first**, falling back
+    to `_cycle_window_start(n)` only for months with no confirmed entry.
+    A window runs from its start up to (not including) the next window's
+    start, and is *named* for the calendar month its start date falls in.
+    **The computed default is a repeating 91-day cycle** — window-start
+    gaps of `(30, 29, 32)` days, in that order, summing to exactly 13
+    weeks — reverse-engineered from 7 consecutive confirmed bill periods
+    (2026-03 through 2026-09), which it reproduces exactly (an earlier
+    "9th of the month, Friday-adjusted if it's a weekend" guess only got
+    5 of those 7 right, missing March and September in opposite
+    directions with no day-of-week explanation found). A 91-day period
+    preserves weekday, which is why starts visibly rotate
+    Tue → Thu → Fri → Tue → ... — the working theory is a meter-read
+    route fixed by weekday on a 13-week rotation, not anything
+    calendar-month-shaped, though this is unconfirmed before 2026-03 and
+    could break if the route ever changes. **Known-vs-computed matters
+    for exactly that reason**: known boundaries always win over the
+    formula, even now that the formula matches every known point exactly
+    — add a new entry to `KNOWN_BILLING_WINDOW_STARTS` every time the
+    user shares another bill's period, both to improve accuracy and to
+    eventually confirm or break the cycle theory. One bill that arrived
+    bundling two meter-read periods into one "catch-up" invoice (double
+    base charge, `$19.90`) still gave two clean confirmed starts from its
+    two listed service periods — summing our independently-computed
+    windows for those two periods matched that bundled bill's total
+    ($676.42) to the penny, strong validation of both the cycle and the
+    per-window rate methodology below working correctly together.
+    `_billing_window_starts()` generates one extra window before the
+    data's earliest date and one trailing boundary after the latest, so
+    `bisect.bisect_right` against that list correctly assigns every day
+    including the partial windows at each end of the dataset. This
+    replaced a plain `e["d"][:7]` calendar-month grouping — if you see
+    `calendar.monthrange` anywhere, it's stale, since window length is now
+    computed as `(next_start - this_start).days`, not a fixed calendar
+    month length.
+  - **Both TDU and the daytime energy rate are billed as a single rate for
+    the whole window, at whichever rate is in effect at the window's
+    *close* — not a per-day blend.** Confirmed against real bills for
+    each independently: a CenterPoint TDU rate change mid-window, and
+    separately a daytime energy rate that turned out to differ across
+    windows too (0.108 in May/June 2026, 0.09940078 in July, ~0.0991 in
+    August — `config.ENERGY_RATE_SCHEDULE`, same shape and lookup
+    convention as `TDU_RATE_SCHEDULE`). Both `tdu_cost` and
+    `day_energy_cost` in `build_billing_windows()` are therefore a single
+    `window_kwh * rate_at_window_end` multiply, **not** a sum of
+    `intervals.tdu_cost` / `intervals.energy_cost` (which are still
+    stored date-split per interval in the DB via `cost.interval_costs()`,
+    and are fine as an approximation for the daily/weekly/trend charts —
+    just not accurate enough for a billing-window total once a rate
+    change lands inside a window). If a *third* thing turns out to drift
+    like this (base charge? ERCOT rate?), assume the same "one rate for
+    the whole window, at close" rule applies until proven otherwise,
+    rather than assuming per-interval date-splitting is right by default.
+    Also: real bills show one lump "TDU Delivery Charges" line (fixed +
+    volumetric together), so `tduCost` in the JSON/chart bundles
+    `tdu_fixed` into it too (`tdu_cost_display`) — `everythingElseCost`'s
+    remainder calc accounts for this, so don't double-subtract the fixed
+    charge if you touch that line.
+  - Each window's bill is split into 4 categories for the frontend's
+    stacked chart: `dayEnergyCost`, `nightEnergyCost` (window-level flat
+    calc, see above), `tduCost` (see above), and `everythingElseCost` —
+    computed as `bill - day - night - tdu`, i.e. a **remainder**, not
+    summed directly from ERCOT+base+tax. This guarantees the 4 stacked
+    segments always add up exactly to `billEstimate` even if the
+    tax/ERCOT/base math changes later; don't replace it with a direct sum
+    without preserving that invariant.
+  - Also computes a **hypothetical no-free-nights bill** per window (same
+    kWh, same TDU/base/tax, but the night kWh that was free gets charged
+    back at `ENERGY_RATE_DAY - NIGHT_ENERGY_RATE`) so the dashboard can
+    show the TOU plan's actual dollar benefit, not just the rate. If the
+    free-period logic in `cost.py` changes, update this alongside it —
+    it's a parallel calculation, not a call into `cost.py`.
+  - Windows are marked `partial` when `daysPresent < daysInWindow` (window
+    length varies, ~28-33 days depending on weekday adjustments at each
+    end) — the frontend renders those bars at reduced opacity and flags
+    them in tooltips/table rather than hiding them, since a partial
+    window's bill/kWh would otherwise mislead by comparison to full ones.
+    A very short partial window (e.g. 1 day of new CSV data past the last
+    known boundary) can produce a wild-looking `effectiveRate` — expected,
+    not a bug, since it's dividing by a tiny kWh denominator.
 - `smart_meter/dashboard_template.html` — the entire frontend: inline CSS
   (light/dark via `prefers-color-scheme`, palette follows the dataviz
   skill's categorical slots as CSS custom properties), inline JS (no
@@ -118,16 +205,26 @@ artifact, not a template rendered per-request.
     delta coloring via the status palette (green=decrease, red=increase
     — "down" is hardcoded as the good direction for both kWh and cost).
   - Monthly summary is one dual-axis chart (deliberate exception to the
-    usual one-axis-per-chart rule, at the user's explicit request): bars
-    on the left axis (bill estimate, toggling to total kWh under the
-    `kwh` unit toggle — the only place unit-toggle changes what's plotted
-    rather than just the axis format) and a dot/line trend of effective
-    $/kWh on a right axis (`yAxisID: 'y1'`, always in $, not unit-toggled
-    — there's no kWh equivalent of a rate). The hypothetical
-    no-free-nights comparison from `build_monthly()` isn't plotted here
-    (it was on a second chart that got folded away) but survives in the
-    savings-note text and the table view. Bars for partial months render
-    at 45% opacity (`withAlpha()`) rather than being excluded.
+    usual one-axis-per-chart rule, at the user's explicit request): a
+    **stacked** bar on the left axis (`MONTHLY_CATEGORIES` — Daytime
+    energy / Nighttime energy / TDU / Everything else, `stack: 'bill'`,
+    `scales.x/y.stacked: true`) and a dot/line trend of effective $/kWh on
+    a right axis (`yAxisID: 'y1'`, always in $ — there's no unit toggle on
+    this chart at all now, since a $-category breakdown has no sensible
+    kWh equivalent). Nighttime energy will render as an invisible
+    zero-height segment under the current plan (free nights); it's kept
+    as its own category rather than folded into "everything else" so the
+    stack mirrors the real bill's line items and stays meaningful if the
+    free-period rate ever becomes nonzero. **Draw order matters and isn't
+    array-index-based for mixed bar+line Chart.js configs**: the line
+    dataset needs a lower `order` value than the bars (`order: 1` vs
+    `order: 2` here) or its point markers render invisibly underneath the
+    bars — learned the hard way, don't remove those `order` fields when
+    touching this chart. The hypothetical no-free-nights comparison from
+    `build_billing_windows()` isn't plotted on this chart (it was on a
+    second chart that got folded away) but survives in the savings-note
+    text and the table view. Bars for partial windows render at 45%
+    opacity (`withAlpha()`) rather than being excluded.
   - Every chart's y-axis carries an explicit `scales.y.title` (and `y1`
     for the monthly chart) naming the measurement and unit — `kWh` /
     `Cost ($)` via `unitAxisLabel()` for the toggleable charts,
@@ -148,11 +245,43 @@ for the day-over-day chart's x-axis.
 
 ## Rate plan numbers currently in config.py
 
-Backed out from one real Oncor/REP bill (see comments in `config.py` for
-the arithmetic): TDU delivery and taxes are **blended per-kWh /
-percentage estimates**, not itemized fixed+variable splits — accurate
-enough for trend/comparison but will drift if usage patterns change
-significantly from the bill they were derived from.
+- **TDU delivery (`TDU_RATE_SCHEDULE`) is now the real published CenterPoint
+  rate-change history** (13 entries, 2024-09 through 2026-09), given
+  directly by the user — not an estimate or inference. It's CenterPoint,
+  not Oncor (an earlier guess from the ESIID prefix was wrong; don't
+  reintroduce "Oncor" into comments/docs). Append new entries as
+  CenterPoint publishes further changes; don't edit old ones.
+- Taxes are still a **blended percentage estimate**, but now cross-checked
+  against two independent real bills: 3.1477% (July) and 3.1634%
+  (August) — close enough that `TAX_RATE_PCT` (3.1477%) doesn't need
+  changing. Still not itemized sales-tax/gross-receipts/PUC splits.
+- `KNOWN_BILLING_WINDOW_STARTS` currently covers 2026-03 through 2026-09,
+  confirmed from 5 real bills' periods (one of which bundled two periods
+  into one catch-up invoice, still yielding two confirmed starts). The
+  91-day-cycle default (see above) reproduces all of these exactly, so
+  it's a solid bet for 2026-03 onward even in months without an explicit
+  override; before 2026-03 it's unconfirmed either way — treat
+  billing-window numbers for 2025 with a bit more skepticism.
+- `ENERGY_RATE_SCHEDULE` (new) replaced the old single `ENERGY_RATE_DAY`
+  constant after a full regression against 5 real bills found the same
+  drift-over-time pattern TDU has: 0.108/kWh confirmed for May, June, and
+  a March/April bill; 0.09940078 for July (exact); ~0.0991 for August
+  (small residual, see below). Only 3 confirmed segments so far — the
+  first entry (0.108) is extended backward as a guess covering all of
+  2025, which no bill has confirmed or refuted.
+- **Regression results after both schedule fixes, across all 5 bills the
+  user has shared:** July exact ($0.01 off), June near-exact ($0.05 off,
+  both day-energy and TDU matched their bill lines exactly), May within
+  $0.39 (day-energy essentially exact; a small ~$0.31 TDU residual — that
+  bill itemizes TDU into 5-6 separate TDSP line items like "Transmission
+  Cost Recovery Factor" that our single blended rate approximates rather
+  than reproduces line-by-line), August within $1.18 (day-energy now
+  exact; ~$1.07 TDU residual, still unexplained — the CenterPoint table
+  values are the best information available, so this may just be that
+  table's own precision limit). The March+April catch-up bill matched to
+  the penny on total ($676.42) when summing our two independently
+  computed windows for it, which is strong end-to-end validation of the
+  whole model (cycle + both rate schedules) rather than one lucky number.
 
 ## Planned future direction
 

@@ -41,7 +41,7 @@ def load_csv(csv_path: str = config.CSV_PATH, db_path: str = config.DB_PATH) -> 
 
             free = cost.is_free_period(start_time)
             energy_cost, ercot_cost, tdu_cost, variable_cost = cost.interval_costs(
-                kwh, start_time
+                kwh, start_time, usage_date
             )
 
             rows_to_insert.append(

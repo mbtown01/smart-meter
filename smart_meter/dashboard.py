@@ -1,6 +1,6 @@
 """Generate a self-contained local HTML dashboard from the SQLite store."""
 
-import calendar
+import bisect
 import datetime
 import json
 import sqlite3
@@ -20,6 +20,10 @@ def build_daily(conn: sqlite3.Connection) -> list:
                SUM(kwh) AS kwh,
                SUM(CASE WHEN is_free THEN kwh ELSE 0 END) AS night_kwh,
                SUM(CASE WHEN NOT is_free THEN kwh ELSE 0 END) AS day_kwh,
+               SUM(CASE WHEN is_free THEN energy_cost ELSE 0 END) AS night_energy_cost,
+               SUM(CASE WHEN NOT is_free THEN energy_cost ELSE 0 END) AS day_energy_cost,
+               SUM(ercot_cost) AS ercot_cost,
+               SUM(tdu_cost) AS tdu_cost,
                SUM(variable_cost) AS cost
         FROM intervals
         GROUP BY usage_date
@@ -27,7 +31,17 @@ def build_daily(conn: sqlite3.Connection) -> list:
         """
     ).fetchall()
     daily = []
-    for usage_date, kwh, night_kwh, day_kwh, cost in rows:
+    for (
+        usage_date,
+        kwh,
+        night_kwh,
+        day_kwh,
+        night_energy_cost,
+        day_energy_cost,
+        ercot_cost,
+        tdu_cost,
+        variable_cost,
+    ) in rows:
         d = datetime.date.fromisoformat(usage_date)
         daily.append(
             {
@@ -36,7 +50,11 @@ def build_daily(conn: sqlite3.Connection) -> list:
                 "kwh": round(kwh, 3),
                 "nightKwh": round(night_kwh, 3),
                 "dayKwh": round(day_kwh, 3),
-                "cost": round(cost, 4),
+                "nightEnergyCost": round(night_energy_cost, 4),
+                "dayEnergyCost": round(day_energy_cost, 4),
+                "ercotCost": round(ercot_cost, 4),
+                "tduCost": round(tdu_cost, 4),
+                "cost": round(variable_cost, 4),
             }
         )
     return daily
@@ -73,48 +91,159 @@ def build_weather(conn: sqlite3.Connection) -> dict:
     return by_date
 
 
-def build_monthly(daily: list) -> list:
-    """Monthly bill/rate summary, plus a hypothetical "no free-nights" bill for
-    the same month (same kWh, same TDU/tax/base -- only the energy charge for
-    night kWh is added back at the day rate) so the gap shows the TOU plan's
-    actual dollar benefit."""
-    by_month = {}
-    for e in daily:
-        ym = e["d"][:7]
-        m = by_month.setdefault(ym, {"kwh": 0.0, "cost": 0.0, "nightKwh": 0.0, "days": 0})
-        m["kwh"] += e["kwh"]
-        m["cost"] += e["cost"]
-        m["nightKwh"] += e["nightKwh"]
-        m["days"] += 1
+# Billing windows repeat on a 91-day cycle (30, 29, 32 day gaps, in that
+# order, summing to exactly 13 weeks) -- reverse-engineered from 7
+# consecutive confirmed real bill periods (2026-03 through 2026-09), which
+# it reproduces exactly. A 91-day period preserves weekday, which is why
+# window starts visibly rotate Tue -> Thu -> Fri -> Tue -> ...; the working
+# theory is a meter-read route fixed by weekday on a 13-week rotation,
+# rather than anything calendar-month-shaped. This replaced an earlier
+# "9th of the month, or the Friday before if it lands on a weekend" guess
+# that got 5 of those 7 points right -- this one gets all 7, but is still
+# unconfirmed before 2026-03 and could break if the route/cycle changes,
+# hence config.KNOWN_BILLING_WINDOW_STARTS overriding it wherever a real
+# bill has confirmed the actual boundary.
+_CYCLE_ANCHOR = datetime.date(2026, 3, 10)  # a confirmed billing-window start
+_CYCLE_STEPS = (30, 29, 32)
+_CYCLE_LEN = sum(_CYCLE_STEPS)  # 91 = exactly 13 weeks
+_CYCLE_CUM = (0, _CYCLE_STEPS[0], _CYCLE_STEPS[0] + _CYCLE_STEPS[1])
 
-    months = []
-    for ym in sorted(by_month):
-        m = by_month[ym]
-        year, mon = int(ym[:4]), int(ym[5:7])
-        days_in_month = calendar.monthrange(year, mon)[1]
 
-        bill = cost.monthly_bill_estimate(m["cost"])
-        effective_rate = bill / m["kwh"] if m["kwh"] else 0
+def _cycle_window_start(n: int) -> datetime.date:
+    """The n-th billing-window start relative to _CYCLE_ANCHOR (n=0 is the
+    anchor itself), stepping through the repeating cycle forward for
+    positive n and backward for negative n."""
+    full_cycles, phase = divmod(n, 3)
+    return _CYCLE_ANCHOR + datetime.timedelta(days=full_cycles * _CYCLE_LEN + _CYCLE_CUM[phase])
 
-        hypothetical_variable_cost = m["cost"] + m["nightKwh"] * config.ENERGY_RATE_DAY
-        hypothetical_bill = cost.monthly_bill_estimate(hypothetical_variable_cost)
-        hypothetical_rate = hypothetical_bill / m["kwh"] if m["kwh"] else 0
 
-        months.append(
+def _resolve_window_start(n: int) -> datetime.date:
+    """The n-th cycle-computed window start, overridden by
+    config.KNOWN_BILLING_WINDOW_STARTS if that start's calendar month has a
+    confirmed entry."""
+    d = _cycle_window_start(n)
+    known = config.KNOWN_BILLING_WINDOW_STARTS.get(f"{d.year:04d}-{d.month:02d}")
+    return datetime.date.fromisoformat(known) if known else d
+
+
+def _billing_window_starts(min_date: datetime.date, max_date: datetime.date) -> list:
+    """Billing-window start dates covering [min_date, max_date], plus one
+    trailing start past max_date so every window's end is known."""
+    avg_step = _CYCLE_LEN / 3
+    n = int((min_date - _CYCLE_ANCHOR).days / avg_step) - 4  # comfortable margin
+    while _resolve_window_start(n) > min_date:
+        n -= 1
+
+    starts = [_resolve_window_start(n)]
+    while starts[-1] <= max_date:
+        n += 1
+        starts.append(_resolve_window_start(n))
+    return starts
+
+
+def build_billing_windows(daily: list) -> list:
+    """Bill/rate summary per billing window -- 12 windows/year, each starting
+    the 9th of the month (or the Friday before, if the 9th falls on a
+    weekend) and running up to the moment before the next window starts.
+    Named by the calendar month its start date falls in. TDU (fixed and
+    volumetric both) is billed at a single rate for the whole window --
+    whichever was in effect at the window's close -- confirmed against two
+    real bills, one of which had a rate change mid-window. Also computes a
+    hypothetical "no free-nights" bill for the same window (same kWh, same
+    TDU/tax/base -- only the energy charge for night kWh is added back at
+    the day rate) so the gap shows the TOU plan's actual dollar benefit,
+    and splits the bill into day/night energy, TDU, and an "everything
+    else" remainder (ERCOT + base charge + tax) for the stacked chart."""
+    if not daily:
+        return []
+
+    dates = [datetime.date.fromisoformat(e["d"]) for e in daily]
+    starts = _billing_window_starts(min(dates), max(dates))
+
+    by_window = {}
+    for e, d in zip(daily, dates):
+        idx = max(bisect.bisect_right(starts, d) - 1, 0)
+        window_start = starts[idx]
+        window_end = starts[idx + 1] if idx + 1 < len(starts) else None
+        w = by_window.setdefault(
+            window_start,
             {
-                "ym": ym,
-                "kwh": round(m["kwh"], 1),
+                "end": window_end,
+                "kwh": 0.0,
+                "dayKwh": 0.0,
+                "nightKwh": 0.0,
+                "ercotCost": 0.0,
+                "days": 0,
+            },
+        )
+        w["kwh"] += e["kwh"]
+        w["dayKwh"] += e["dayKwh"]
+        w["nightKwh"] += e["nightKwh"]
+        w["ercotCost"] += e["ercotCost"]
+        w["days"] += 1
+
+    windows = []
+    for window_start in sorted(by_window):
+        w = by_window[window_start]
+        window_end = w["end"]
+        days_in_window = (window_end - window_start).days if window_end else w["days"]
+
+        # Both TDU and the daytime energy rate are billed as a single rate for
+        # the WHOLE window, not date-split per interval -- confirmed against
+        # real bills for each: a mid-window CenterPoint TDU rate change, and
+        # separately an energy rate that turned out to differ across windows
+        # (0.108 in May/June, 0.09940078 in July, ~0.0991 in August). Both use
+        # whichever rate was in effect at the window's *end* (i.e. when the
+        # bill actually gets cut), not a blend of the rates that applied on
+        # each individual day. The TDU fixed monthly charge follows the same rule.
+        window_last_day = (window_end - datetime.timedelta(days=1)) if window_end else window_start
+        tdu_fixed, tdu_rate = cost.tdu_rate_for_date(window_last_day.isoformat())
+        tdu_cost = w["kwh"] * tdu_rate
+        # Real bills show one lump "TDU Delivery Charges" line (fixed + volumetric
+        # combined) rather than breaking them out -- match that for the stacked
+        # chart/table category, even though the fixed charge is tracked separately
+        # below for the tax/subtotal math (monthly_bill_estimate adds it there).
+        tdu_cost_display = tdu_cost + tdu_fixed
+
+        day_rate = cost.energy_rate_for_date(window_last_day.isoformat())
+        day_energy_cost = w["dayKwh"] * day_rate
+        night_energy_cost = w["nightKwh"] * config.NIGHT_ENERGY_RATE
+
+        variable_cost = day_energy_cost + night_energy_cost + w["ercotCost"] + tdu_cost
+        bill = cost.monthly_bill_estimate(variable_cost, tdu_fixed)
+        effective_rate = bill / w["kwh"] if w["kwh"] else 0
+
+        hypothetical_variable_cost = variable_cost + w["nightKwh"] * (
+            day_rate - config.NIGHT_ENERGY_RATE
+        )
+        hypothetical_bill = cost.monthly_bill_estimate(hypothetical_variable_cost, tdu_fixed)
+        hypothetical_rate = hypothetical_bill / w["kwh"] if w["kwh"] else 0
+
+        # Remainder rather than a direct sum, so the stacked chart's segments
+        # always add up exactly to the bill total (ERCOT + base charge + tax).
+        everything_else_cost = bill - day_energy_cost - night_energy_cost - tdu_cost_display
+
+        windows.append(
+            {
+                "ym": window_start.isoformat()[:7],
+                "start": window_start.isoformat(),
+                "end": (window_end - datetime.timedelta(days=1)).isoformat() if window_end else None,
+                "kwh": round(w["kwh"], 1),
+                "dayEnergyCost": round(day_energy_cost, 2),
+                "nightEnergyCost": round(night_energy_cost, 2),
+                "tduCost": round(tdu_cost_display, 2),
+                "everythingElseCost": round(everything_else_cost, 2),
                 "billEstimate": round(bill, 2),
                 "effectiveRate": round(effective_rate, 4),
                 "hypotheticalBillEstimate": round(hypothetical_bill, 2),
                 "hypotheticalEffectiveRate": round(hypothetical_rate, 4),
                 "savingsEstimate": round(hypothetical_bill - bill, 2),
-                "daysPresent": m["days"],
-                "daysInMonth": days_in_month,
-                "partial": m["days"] < days_in_month,
+                "daysPresent": w["days"],
+                "daysInWindow": days_in_window,
+                "partial": w["days"] < days_in_window,
             }
         )
-    return months
+    return windows
 
 
 def stats(daily: list) -> dict:
@@ -140,8 +269,12 @@ def render(db_path: str = config.DB_PATH, out_path: str = config.DASHBOARD_PATH)
     intervals = build_intervals(conn)
     weeks = build_weeks(daily)
     weather = build_weather(conn)
-    monthly = build_monthly(daily)
+    monthly = build_billing_windows(daily)
     conn.close()
+
+    today = datetime.date.today().isoformat()
+    current_tdu_fixed, current_tdu_rate = cost.tdu_rate_for_date(today)
+    current_energy_rate = cost.energy_rate_for_date(today)
 
     data = {
         "generatedAt": datetime.datetime.now().isoformat(timespec="seconds"),
@@ -152,11 +285,12 @@ def render(db_path: str = config.DB_PATH, out_path: str = config.DASHBOARD_PATH)
         "monthly": monthly,
         "stats": stats(daily),
         "config": {
-            "energyRateDay": config.ENERGY_RATE_DAY,
+            "energyRateDay": current_energy_rate,
             "freeStart": config.FREE_PERIOD_START,
             "freeEnd": config.FREE_PERIOD_END,
             "baseMonthlyCharge": config.BASE_MONTHLY_CHARGE,
-            "tdurate": config.TDU_RATE_PER_KWH,
+            "tduFixedMonthly": current_tdu_fixed,
+            "tduRate": current_tdu_rate,
             "taxRatePct": config.TAX_RATE_PCT,
         },
     }

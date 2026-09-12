@@ -2,8 +2,17 @@
 
 Local dashboard for Smart Meter Texas 15-minute interval exports: usage
 trend over time, day-over-day and week-over-week comparisons (with a
-Houston temperature overlay), a monthly bill/effective-rate summary, and
-cost estimates based on your actual TOU rate plan.
+Houston temperature overlay), a billing-month bill/effective-rate summary,
+and cost estimates based on your actual TOU rate plan.
+
+"Billing months" here means your actual billing cycle, not the calendar
+month. The best current guess is a repeating 91-day cycle (window-start
+gaps of 30, 29, 32 days, in that order, which sums to exactly 13 weeks) -
+reverse-engineered from your real bills, which it reproduces exactly.
+Known cycle boundaries confirmed from your actual bills always override
+that computed guess (see `KNOWN_BILLING_WINDOW_STARTS` in `config.py`) -
+add an entry there whenever you get a new bill, both for accuracy and to
+help confirm (or eventually disprove) the cycle theory.
 
 ## Usage
 
@@ -29,8 +38,14 @@ from the CSV and regenerates `dashboard.html`, so it's always safe to re-run.
 
 ## Rate plan
 
-Edit `config.py` if your plan or TDU charges change. Current values were
-backed out from an actual bill - see the comments in that file for how.
+Edit `config.py` if your plan changes. Both TDU delivery and the daytime
+energy rate turn out to drift over time, so both are schedules -
+`TDU_RATE_SCHEDULE` (`effective_date, fixed_monthly, rate_per_kwh`) and
+`ENERGY_RATE_SCHEDULE` (`effective_date, rate_per_kwh`). Append a new
+entry to either when your rate changes rather than editing the old one,
+so historical billing months keep using the rate that was actually in
+effect then. Other values (free-period window, taxes) were backed out
+from actual bills - see the comments in that file for how.
 
 ## Layout
 

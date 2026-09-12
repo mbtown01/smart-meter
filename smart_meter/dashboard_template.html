@@ -110,6 +110,7 @@
   }
 
   details.table-toggle { margin-top: 10px; }
+  details.table-toggle > div { overflow-x: auto; }
   details.table-toggle summary {
     font-size: 12px; color: var(--text-secondary); cursor: pointer;
   }
@@ -157,7 +158,7 @@
 
   <div class="card">
     <h2>Monthly summary</h2>
-    <div class="desc">Estimated all-in monthly bill (bars) and effective $/kWh (line) &mdash; the table below also has what you'd have paid with no free-night window, to show whether the TOU plan is helping.</div>
+    <div class="desc">Billing months (your actual cycle, not the calendar month), stacked into daytime energy / TDU / everything else, with effective $/kWh as a line &mdash; the table below also has what you'd have paid with no free-night window, to show whether the TOU plan is helping.</div>
     <div class="chart-box"><canvas id="monthlyBillChart"></canvas></div>
     <div class="savings-note" id="monthlySavingsNote"></div>
     <details class="table-toggle"><summary>View as table</summary><div id="monthlyTableWrap"></div></details>
@@ -253,8 +254,9 @@ function renderHeader() {
     `${d.length} days of interval data (${range}). Generated ${DATA.generatedAt}.`;
   const c = DATA.config;
   document.getElementById('rateNote').textContent =
-    `${c.energyRateDay}/kWh (${c.freeStart}-${c.freeEnd} free) + TDU ~$${c.tdurate}/kWh, ` +
-    `$${c.baseMonthlyCharge}/mo base, ~${(c.taxRatePct*100).toFixed(2)}% taxes/fees on top of usage-based charges.`;
+    `${c.energyRateDay}/kWh (${c.freeStart}-${c.freeEnd} free) + TDU $${c.tduRate}/kWh + $${c.tduFixedMonthly}/mo, ` +
+    `$${c.baseMonthlyCharge}/mo base, ~${(c.taxRatePct*100).toFixed(2)}% taxes/fees on top of usage-based charges ` +
+    `(current TDU rate shown; historical months may reflect an earlier rate).`;
 }
 
 function renderStats() {
@@ -703,44 +705,46 @@ function withAlpha(hex, a) {
   return `rgba(${r},${g},${b},${a})`;
 }
 
+const MONTHLY_CATEGORIES = [
+  { key: 'dayEnergyCost', label: 'Daytime energy', slot: 0 },
+  { key: 'tduCost', label: 'TDU', slot: 1 },
+  { key: 'everythingElseCost', label: 'Everything else', slot: 2 },
+];
+const MONTHLY_RATE_SLOT = 3;
+
 function renderMonthly() {
   const months = DATA.monthly;
   const labels = months.map(m => fmtMonthLabel(m.ym));
-  const billColors = months.map(m => withAlpha(slotColor(0), m.partial ? 0.45 : 1));
-  const barLabel = unit === 'kwh' ? 'Monthly usage' : 'Estimated bill';
-  const barUnitLabel = unit === 'kwh' ? 'kWh' : 'Estimated bill ($)';
+
+  const stackDatasets = MONTHLY_CATEGORIES.map(cat => ({
+    type: 'bar',
+    label: cat.label,
+    data: months.map(m => m[cat.key]),
+    backgroundColor: months.map(m => withAlpha(slotColor(cat.slot), m.partial ? 0.45 : 1)),
+    borderColor: surface(),
+    borderWidth: 1,
+    stack: 'bill',
+    yAxisID: 'y',
+    order: 2,
+  }));
+  const rateDataset = {
+    type: 'line',
+    label: 'Effective rate',
+    data: months.map(m => m.effectiveRate),
+    borderColor: slotColor(MONTHLY_RATE_SLOT),
+    borderWidth: 2,
+    pointRadius: 4,
+    pointBackgroundColor: slotColor(MONTHLY_RATE_SLOT),
+    pointBorderColor: surface(),
+    pointBorderWidth: 2,
+    tension: 0.15,
+    yAxisID: 'y1',
+    order: 1,
+  };
 
   if (monthlyBillChart) monthlyBillChart.destroy();
   monthlyBillChart = new Chart(document.getElementById('monthlyBillChart'), {
-    data: {
-      labels,
-      datasets: [
-        {
-          type: 'bar',
-          label: barLabel,
-          data: months.map(m => unit === 'kwh' ? m.kwh : m.billEstimate),
-          backgroundColor: billColors,
-          borderRadius: 4,
-          maxBarThickness: 24,
-          yAxisID: 'y',
-          order: 2,
-        },
-        {
-          type: 'line',
-          label: 'Effective rate',
-          data: months.map(m => m.effectiveRate),
-          borderColor: slotColor(1),
-          borderWidth: 2,
-          pointRadius: 4,
-          pointBackgroundColor: slotColor(1),
-          pointBorderColor: surface(),
-          pointBorderWidth: 2,
-          tension: 0.15,
-          yAxisID: 'y1',
-          order: 1,
-        },
-      ],
-    },
+    data: { labels, datasets: [...stackDatasets, rateDataset] },
     options: {
       animation: false,
       maintainAspectRatio: false,
@@ -749,23 +753,31 @@ function renderMonthly() {
         legend: { position: 'top', align: 'end' },
         tooltip: {
           callbacks: {
-            label: (ctx) => {
-              if (ctx.dataset.yAxisID === 'y1') {
-                return ` Effective rate: $${ctx.parsed.y.toFixed(3)}/kWh`;
-              }
-              const m = months[ctx.dataIndex];
-              const base = unit === 'kwh' ? `${m.kwh.toFixed(1)} kWh` : `$${m.billEstimate.toFixed(2)}`;
-              return m.partial ? ` ${barLabel}: ${base} (partial: ${m.daysPresent}/${m.daysInMonth} days)` : ` ${barLabel}: ${base}`;
+            title: (items) => {
+              if (!items.length) return '';
+              const m = months[items[0].dataIndex];
+              return `${fmtMonthLabel(m.ym)}  (${m.start} to ${m.end})`;
+            },
+            label: (ctx) => ctx.dataset.yAxisID === 'y1'
+              ? ` Effective rate: $${ctx.parsed.y.toFixed(3)}/kWh`
+              : ` ${ctx.dataset.label}: $${ctx.parsed.y.toFixed(2)}`,
+            footer: (items) => {
+              const barItem = items.find(i => i.dataset.yAxisID === 'y');
+              if (!barItem) return '';
+              const m = months[barItem.dataIndex];
+              const total = `Total bill: $${m.billEstimate.toFixed(2)}`;
+              return m.partial ? `${total} (partial: ${m.daysPresent}/${m.daysInWindow} days)` : total;
             },
           },
         },
       },
       scales: {
-        x: { ticks: { color: muted() }, grid: { display: false } },
+        x: { stacked: true, ticks: { color: muted() }, grid: { display: false } },
         y: {
+          stacked: true,
           position: 'left',
-          title: { display: true, text: barUnitLabel, color: muted() },
-          ticks: { color: muted(), callback: (v) => unit === 'kwh' ? v.toFixed(0) : '$' + v.toFixed(0) },
+          title: { display: true, text: 'Estimated bill ($)', color: muted() },
+          ticks: { color: muted(), callback: (v) => '$' + v.toFixed(0) },
           grid: { color: gridline() },
         },
         y1: {
@@ -783,7 +795,7 @@ function renderMonthly() {
   let bestMonth = months[0];
   months.forEach(m => { if (m.savingsEstimate > bestMonth.savingsEstimate) bestMonth = m; });
   document.getElementById('monthlySavingsNote').innerHTML =
-    `Estimated total saved by the free-night window across ${months.length} months (${fullMonths} full): ` +
+    `Estimated total saved by the free-night window across ${months.length} billing months (${fullMonths} full): ` +
     `<strong>$${totalSavings.toFixed(2)}</strong>. Biggest single-month benefit: ` +
     `<strong>${fmtMonthLabel(bestMonth.ym)}</strong> ($${bestMonth.savingsEstimate.toFixed(2)}).`;
 
@@ -792,7 +804,10 @@ function renderMonthly() {
   const table = document.createElement('table');
   table.className = 'data-table';
   const thead = document.createElement('tr');
-  ['Month', 'kWh', 'Bill est.', 'Effective rate', 'If no free nights', 'Savings'].forEach(h => {
+  [
+    'Billing month', 'Start', 'End', 'kWh', 'Day energy',
+    'TDU', 'Other', 'Bill est.', 'Effective rate', 'If no free nights', 'Savings',
+  ].forEach(h => {
     const th = document.createElement('th'); th.textContent = h; thead.appendChild(th);
   });
   table.appendChild(thead);
@@ -800,7 +815,12 @@ function renderMonthly() {
     const tr = document.createElement('tr');
     [
       fmtMonthLabel(m.ym) + (m.partial ? ' *' : ''),
+      m.start,
+      m.end ?? '',
       m.kwh.toFixed(1),
+      '$' + m.dayEnergyCost.toFixed(2),
+      '$' + m.tduCost.toFixed(2),
+      '$' + m.everythingElseCost.toFixed(2),
       '$' + m.billEstimate.toFixed(2),
       '$' + m.effectiveRate.toFixed(3) + '/kWh',
       '$' + m.hypotheticalEffectiveRate.toFixed(3) + '/kWh',
@@ -813,7 +833,7 @@ function renderMonthly() {
     const note = document.createElement('div');
     note.className = 'sub';
     note.style.marginTop = '6px';
-    note.textContent = '* partial month (fewer days of data than the full calendar month)';
+    note.textContent = '* partial billing month (fewer days of data than the full window)';
     wrap.appendChild(note);
   }
 }
