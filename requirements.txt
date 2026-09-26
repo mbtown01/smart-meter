@@ -1,0 +1,11 @@
+# Only needed for the SMT auto-pull path (smart_meter/smt_client.py).
+# The CSV-based build_dashboard.py workflow stays pure-stdlib and needs
+# none of this.
+#
+# smart-meter-texas's own PyPI metadata omits two of its hard imports
+# (certifi, pyOpenSSL) -- confirmed by a clean-venv install failing on
+# `import certifi`. Pinned here explicitly so `pip install -r
+# requirements.txt` actually works.
+smart-meter-texas>=0.5.5
+certifi
+pyOpenSSL

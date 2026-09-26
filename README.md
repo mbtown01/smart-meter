@@ -36,6 +36,57 @@ help confirm (or eventually disprove) the cycle theory.
 Re-running `build_dashboard.py` fully reloads the SQLite DB (`meter_data.db`)
 from the CSV and regenerates `dashboard.html`, so it's always safe to re-run.
 
+## SMT auto-pull (local testing)
+
+Instead of dropping a CSV, you can pull recent usage directly from Smart
+Meter Texas. This is genuinely two separate steps -- pulling data and
+regenerating the HTML are different scripts, not one command:
+
+1. **One-time setup:**
+
+   ```
+   python3 -m venv .venv
+   source .venv/bin/activate
+   pip install -r requirements.txt
+   cp .env.example .env        # then edit .env with your real SMT login
+   ```
+
+   `.env` is gitignored -- it holds `SMT_USERNAME`/`SMT_PASSWORD` and should
+   never be committed. `.env.example` is the safe-to-commit template; keep
+   real values out of it.
+
+2. **Step 1 -- pull from SMT into the DB:**
+
+   ```
+   set -a; source .env; set +a
+   python3 -m smart_meter.ingest --from-smt 14
+   ```
+
+   Pulls the last 14 days (adjust the number) and (re)inserts just those
+   dates into `meter_data.db` -- older history is left alone. Re-running
+   this is safe; it's how you pick up SMT's estimated -> actual revisions.
+
+3. **Step 2 -- regenerate the HTML from whatever's in the DB:**
+
+   ```
+   python3 update_dashboard.py
+   ```
+
+   No SMT credentials needed for this step -- it only reads the local DB
+   and (if needed) extends the cached weather range. Deliberately does NOT
+   reload the CSV, so it won't undo step 1.
+
+4. Open `dashboard.html` in a browser.
+
+**Debugging in VS Code:** `.vscode/launch.json` has four ready-to-run
+configs (Run and Debug panel, or F5): "1. SMT Ingest", "2. Update
+Dashboard", "Build Dashboard from CSV" (the original full-reload path),
+and "SMT Client dry-run" (fetches and prints one day's intervals without
+touching the DB -- useful for inspecting a raw response). The SMT-talking
+configs load credentials from `.env` automatically via `envFile`; set
+breakpoints in `smart_meter/ingest.py` or `smart_meter/smt_client.py` and
+step through either half of the pipeline independently.
+
 ## Rate plan
 
 Edit `config.py` if your plan changes. Both TDU delivery and the daytime
@@ -51,10 +102,18 @@ from actual bills - see the comments in that file for how.
 
 - `data/export.csv` - raw CSV export (yours, not checked in)
 - `config.py` - rate plan config + Houston lat/lon for the weather fetch
-- `smart_meter/ingest.py` - CSV -> SQLite loader
+- `.env` - your SMT login (gitignored); `.env.example` is the checked-in template
+- `requirements.txt` - the one pip dependency (`smart-meter-texas`), needed
+  only for the SMT auto-pull path -- the CSV path stays pure stdlib
+- `smart_meter/ingest.py` - CSV -> SQLite loader, plus `--from-smt` (SMT -> SQLite)
+- `smart_meter/smt_client.py` - talks to Smart Meter Texas's unofficial API
 - `smart_meter/cost.py` - TOU cost calculations
 - `smart_meter/weather.py` - Houston hourly temperature fetch + local cache
 - `smart_meter/dashboard.py` + `dashboard_template.html` - dashboard generator
+- `build_dashboard.py` - CSV -> DB (full reload) -> HTML, one command
+- `update_dashboard.py` - DB -> HTML only, no ingest (pairs with `--from-smt`)
 - `meter_data.db` - local SQLite store (regenerated each run, not checked in)
 - `dashboard.html` - the generated dashboard (open this)
 - `vendor/chart.umd.min.js` - vendored Chart.js, for offline use
+- `.vscode/launch.json` - debug configs for stepping through SMT ingest and
+  dashboard regen separately

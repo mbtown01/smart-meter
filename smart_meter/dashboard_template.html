@@ -141,6 +141,21 @@
   .chart-box-sm { position: relative; height: 220px; }
   .savings-note { font-size: 13px; margin-top: 10px; }
   .savings-note strong { color: var(--text-primary); }
+
+  .chart-box-xs { position: relative; height: 140px; }
+  .facet-grid {
+    display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px 16px;
+  }
+  .facet-panel { min-width: 0; }
+  .facet-panel h3 { font-size: 12px; font-weight: 600; margin: 0 0 2px; }
+  .facet-panel .facet-note { font-size: 11px; color: var(--text-secondary); margin-bottom: 4px; }
+  .facet-axis-note { font-size: 11px; color: var(--text-muted); margin-top: 10px; }
+  .month-legend { display: flex; flex-wrap: wrap; gap: 8px 12px; margin-bottom: 12px; }
+  .month-legend-item { display: flex; align-items: center; gap: 4px; font-size: 11px; color: var(--text-secondary); }
+  .month-legend-item .swatch { width: 9px; height: 9px; border-radius: 2px; }
+  @media (max-width: 720px) {
+    .facet-grid { grid-template-columns: repeat(2, 1fr); }
+  }
 </style>
 </head>
 <body>
@@ -202,6 +217,15 @@
     <div class="desc">Same this-week/last-week axis, hourly outdoor temperature &mdash; line it up against the usage chart above to see how much of your usage is weather-driven.</div>
     <div class="week-legend" id="weekTempLegend"></div>
     <div class="chart-box"><canvas id="weekTempChart"></canvas></div>
+  </div>
+
+  <div class="card">
+    <h2>Temperature vs. usage, by time of day</h2>
+    <div class="desc">Each day split into eight 3-hour windows &mdash; average temperature vs. total usage in that window, one panel per window, same axes throughout so slope is directly comparable. Steep = weather-driven; flat = driven by something else (e.g. habit, not heat, during the free window). Dots are colored by calendar month to check for seasonal hysteresis &mdash; whether the same temperature drives different usage depending on time of year (humidity, AC ramp-up/down, etc).</div>
+    <div class="month-legend" id="tempScatterMonthLegend"></div>
+    <div class="facet-grid" id="tempScatterGrid"></div>
+    <div class="facet-axis-note" id="tempScatterAxisNote"></div>
+    <details class="table-toggle"><summary>View as table</summary><div id="tempScatterTableWrap"></div></details>
   </div>
 
   <div class="sub" style="margin-top:8px;">
@@ -694,6 +718,233 @@ function renderWeek() {
   wrap.appendChild(table);
 }
 
+// ---- Temperature vs. usage, by time of day ----
+let tempScatterCharts = [];
+const TOD_BUCKETS = [
+  { label: '12–3am', start: 0 },
+  { label: '3–6am', start: 180 },
+  { label: '6–9am', start: 360 },
+  { label: '9am–12pm', start: 540 },
+  { label: '12–3pm', start: 720 },
+  { label: '3–6pm', start: 900 },
+  { label: '6–9pm', start: 1080 },
+  { label: '9pm–12am', start: 1260 },
+];
+const BUCKET_MIN = 180;
+const MONTH_LABELS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
+// Cyclic hue wheel for month-of-year (Dec is adjacent to Jan, not opposite
+// it, so this is a phase encoding, not a magnitude ramp -- a single-hue
+// sequential ramp would falsely make Jan and Dec look like opposite
+// extremes instead of neighbors).
+function hslToHex(h, s, l) {
+  s /= 100; l /= 100;
+  const c = (1 - Math.abs(2 * l - 1)) * s;
+  const x = c * (1 - Math.abs((h / 60) % 2 - 1));
+  const m = l - c / 2;
+  let r, g, b;
+  if (h < 60) [r, g, b] = [c, x, 0];
+  else if (h < 120) [r, g, b] = [x, c, 0];
+  else if (h < 180) [r, g, b] = [0, c, x];
+  else if (h < 240) [r, g, b] = [0, x, c];
+  else if (h < 300) [r, g, b] = [x, 0, c];
+  else [r, g, b] = [c, 0, x];
+  const toHex = (v) => Math.round((v + m) * 255).toString(16).padStart(2, '0');
+  return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
+}
+function monthColor(month1to12) {
+  const hue = ((month1to12 - 1) * 30) % 360;
+  const dark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+  return hslToHex(hue, dark ? 62 : 68, dark ? 60 : 48);
+}
+function renderMonthLegend() {
+  const legend = document.getElementById('tempScatterMonthLegend');
+  legend.innerHTML = '';
+  MONTH_LABELS.forEach((label, i) => {
+    const item = document.createElement('span');
+    item.className = 'month-legend-item';
+    const sw = document.createElement('span'); sw.className = 'swatch'; sw.style.background = monthColor(i + 1);
+    const txt = document.createElement('span'); txt.textContent = label;
+    item.appendChild(sw); item.appendChild(txt);
+    legend.appendChild(item);
+  });
+}
+
+function linregress(points) {
+  const n = points.length;
+  if (n < 2) return null;
+  let sumX = 0, sumY = 0, sumXY = 0, sumXX = 0;
+  points.forEach(p => { sumX += p.x; sumY += p.y; sumXY += p.x * p.y; sumXX += p.x * p.x; });
+  const denom = n * sumXX - sumX * sumX;
+  if (denom === 0) return null;
+  const slope = (n * sumXY - sumX * sumY) / denom;
+  const intercept = (sumY - slope * sumX) / n;
+  const meanY = sumY / n;
+  let ssRes = 0, ssTot = 0;
+  points.forEach(p => {
+    const pred = slope * p.x + intercept;
+    ssRes += (p.y - pred) ** 2;
+    ssTot += (p.y - meanY) ** 2;
+  });
+  const r2 = ssTot > 0 ? 1 - ssRes / ssTot : 0;
+  return { slope, intercept, r2 };
+}
+
+// One point per (date, 3-hour window): avg temp in that window vs. total
+// usage in that window. Buckets are 3h wide so an hourly weather reading
+// covers each third of a bucket exactly.
+function buildTodBucketData() {
+  const buckets = TOD_BUCKETS.map(b => ({ ...b, points: [] }));
+  Object.keys(DATA.intervals).forEach(date => {
+    const weather = DATA.weather[date];
+    if (!weather || !weather.length) return;
+    const tempSums = new Array(8).fill(0), tempCounts = new Array(8).fill(0);
+    weather.forEach(([mins, temp]) => {
+      const idx = Math.floor(mins / BUCKET_MIN);
+      if (idx >= 0 && idx < 8) { tempSums[idx] += temp; tempCounts[idx]++; }
+    });
+    const kwhSums = new Array(8).fill(0), costSums = new Array(8).fill(0);
+    DATA.intervals[date].forEach(([mins, kwh, cost]) => {
+      const idx = Math.floor(mins / BUCKET_MIN);
+      if (idx >= 0 && idx < 8) { kwhSums[idx] += kwh; costSums[idx] += cost; }
+    });
+    for (let i = 0; i < 8; i++) {
+      if (tempCounts[i] === 0) continue;
+      buckets[i].points.push({
+        x: tempSums[i] / tempCounts[i],
+        y: unit === 'kwh' ? kwhSums[i] : costSums[i],
+        d: date,
+        month: Number(date.slice(5, 7)),
+      });
+    }
+  });
+  return buckets;
+}
+
+function renderTempScatter() {
+  tempScatterCharts.forEach(c => c.destroy());
+  tempScatterCharts = [];
+  const grid = document.getElementById('tempScatterGrid');
+  grid.innerHTML = '';
+  renderMonthLegend();
+
+  const buckets = buildTodBucketData();
+  const allPoints = buckets.flatMap(b => b.points);
+  if (!allPoints.length) {
+    grid.innerHTML = '<div class="sub">Not enough overlapping usage/weather data yet.</div>';
+    document.getElementById('tempScatterAxisNote').textContent = '';
+    document.getElementById('tempScatterTableWrap').innerHTML = '';
+    return;
+  }
+
+  // Shared axis domain across all eight panels so slope is directly comparable.
+  const xs = allPoints.map(p => p.x), ys = allPoints.map(p => p.y);
+  const xMin = Math.floor(Math.min(...xs)), xMax = Math.ceil(Math.max(...xs));
+  const yMin = Math.min(0, Math.min(...ys));
+  const yMax = Math.max(...ys) * 1.05;
+
+  buckets.forEach((b, i) => {
+    const panel = document.createElement('div');
+    panel.className = 'facet-panel';
+    const h3 = document.createElement('h3');
+    h3.textContent = b.label;
+    const note = document.createElement('div');
+    note.className = 'facet-note';
+    const box = document.createElement('div');
+    box.className = 'chart-box-xs';
+    const canvas = document.createElement('canvas');
+    canvas.id = `tempScatterChart${i}`;
+    box.appendChild(canvas);
+    panel.appendChild(h3);
+    panel.appendChild(note);
+    panel.appendChild(box);
+    grid.appendChild(panel);
+
+    const fit = linregress(b.points);
+    note.textContent = fit
+      ? `${unit === 'kwh' ? fit.slope.toFixed(2) + ' kWh' : '$' + fit.slope.toFixed(3)}/°F · R²=${fit.r2.toFixed(2)}`
+      : 'not enough data';
+
+    const datasets = [{
+      type: 'scatter',
+      data: b.points,
+      backgroundColor: (ctx) => ctx.raw ? withAlpha(monthColor(ctx.raw.month), 0.8) : slotColor(0),
+      borderColor: surface(),
+      borderWidth: 1,
+      pointRadius: 3,
+      pointHoverRadius: 5,
+    }];
+    if (fit) {
+      datasets.push({
+        type: 'line',
+        data: [
+          { x: xMin, y: fit.slope * xMin + fit.intercept },
+          { x: xMax, y: fit.slope * xMax + fit.intercept },
+        ],
+        borderColor: secondary(),
+        borderDash: [5, 3],
+        borderWidth: 1.5,
+        pointRadius: 0,
+        tension: 0,
+      });
+    }
+
+    tempScatterCharts.push(new Chart(canvas, {
+      data: { datasets },
+      options: {
+        animation: false,
+        maintainAspectRatio: false,
+        plugins: {
+          legend: { display: false },
+          tooltip: {
+            filter: (item) => item.dataset.type !== 'line',
+            callbacks: {
+              title: (items) => items.length ? items[0].raw.d : '',
+              label: (ctx) => ` ${fmt(ctx.parsed.y)} at ${ctx.parsed.x.toFixed(0)}°F`,
+            },
+          },
+        },
+        scales: {
+          x: {
+            type: 'linear', min: xMin, max: xMax,
+            ticks: { color: muted(), maxTicksLimit: 4, callback: (v) => Math.round(v) + '°' },
+            grid: { color: gridline() },
+          },
+          y: {
+            min: yMin, max: yMax,
+            ticks: { color: muted(), maxTicksLimit: 4, callback: (v) => fmtShort(v) },
+            grid: { color: gridline() },
+          },
+        },
+      },
+    }));
+  });
+
+  document.getElementById('tempScatterAxisNote').textContent =
+    `X axis (all panels): Houston avg temp per 3-hour window, °F. Y axis (all panels): ${unitAxisLabel()} per window. Shared scale across panels so slopes compare directly.`;
+
+  const wrap = document.getElementById('tempScatterTableWrap');
+  wrap.innerHTML = '';
+  const table = document.createElement('table');
+  table.className = 'data-table';
+  const thead = document.createElement('tr');
+  ['Date', 'Window', 'Avg temp (°F)', unit === 'kwh' ? 'kWh' : 'Cost'].forEach(h => {
+    const th = document.createElement('th'); th.textContent = h; thead.appendChild(th);
+  });
+  table.appendChild(thead);
+  const rows = [];
+  buckets.forEach((b, i) => b.points.forEach(p => rows.push({ ...p, label: b.label, order: i })));
+  rows.sort((a, c) => a.d === c.d ? a.order - c.order : (a.d < c.d ? -1 : 1));
+  rows.forEach(p => {
+    const tr = document.createElement('tr');
+    [p.d, p.label, p.x.toFixed(1), fmtShort(p.y)].forEach(t => {
+      const td = document.createElement('td'); td.textContent = t; tr.appendChild(td);
+    });
+    table.appendChild(tr);
+  });
+  wrap.appendChild(table);
+}
+
 // ---- Monthly summary ----
 let monthlyBillChart;
 function fmtMonthLabel(ym) {
@@ -858,6 +1109,7 @@ function renderAll() {
   renderTrend();
   renderDay();
   renderWeek();
+  renderTempScatter();
 }
 
 document.getElementById('unit-kwh').onclick = () => {

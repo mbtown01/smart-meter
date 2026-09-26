@@ -1,0 +1,44 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "1. SMT Ingest (pull SMT -> DB)",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "smart_meter.ingest",
+            "args": ["--from-smt", "14"],
+            "envFile": "${workspaceFolder}/.env",
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
+        {
+            "name": "2. Update Dashboard (DB -> HTML)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/update_dashboard.py",
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
+        {
+            "name": "Build Dashboard from CSV (full reload)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/build_dashboard.py",
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
+        {
+            "name": "SMT Client dry-run (fetch only, no DB write)",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "smart_meter.smt_client",
+            "envFile": "${workspaceFolder}/.env",
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "justMyCode": true
+        }
+    ]
+}

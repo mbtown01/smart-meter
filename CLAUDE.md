@@ -8,11 +8,16 @@ A local dashboard for analyzing Smart Meter Texas (SMT) 15-minute interval
 usage data: a monthly bill/effective-rate summary, usage trend over time,
 day-over-day and week-over-week comparisons (with a Houston temperature
 overlay), and cost estimates driven by the user's actual TOU rate plan.
-Pure Python 3 stdlib (no pip dependencies) + a static HTML/Chart.js frontend.
-No web framework, no build step, no package.json for the app itself. The
-*build* step needs network access when it has to fetch new weather data
-(see `smart_meter/weather.py` below); the generated `dashboard.html` itself
-has no network calls and works fully offline once produced.
+Pure Python 3 stdlib + a static HTML/Chart.js frontend, with one deliberate
+exception: `smart_meter/smt_client.py` (the Smart Meter Texas auto-pull path)
+depends on the `smart-meter-texas` PyPI package (see `requirements.txt`) --
+its auth/session/SSL-cert-chain handling isn't worth reimplementing in
+stdlib. The CSV-based `build_dashboard.py` path needs no pip installs at
+all. No web framework, no build step, no package.json for the app itself.
+The *build* step needs network access when it has to fetch new weather data
+(see `smart_meter/weather.py` below) or pull from SMT; the generated
+`dashboard.html` itself has no network calls and works fully offline once
+produced.
 
 ## Commands
 
@@ -74,14 +79,35 @@ artifact, not a template rendered per-request.
 - `smart_meter/db.py` — schema only (`intervals` table + indexes). One
   table, no migrations — schema changes mean editing `SCHEMA` and doing a
   fresh `build_dashboard.py` run (full reload handles it).
-- `smart_meter/ingest.py` — CSV -> SQLite. Always deletes and re-inserts all
-  rows rather than upserting/deduping. This is deliberate: SMT's DST
+- `smart_meter/ingest.py` — two entry points into the same `intervals`
+  table. `load_csv()` (CSV -> SQLite, `python3 build_dashboard.py` or
+  `python3 -m smart_meter.ingest [path]`) always deletes and re-inserts
+  *all* rows rather than upserting/deduping. This is deliberate: SMT's DST
   fall-back day emits a genuinely repeated clock hour (not a duplicate to
   dedupe), and spring-forward emits placeholder rows with empty
   `USAGE_KWH` (skipped, not zeroed) — a dedupe-by-key approach would drop
-  or corrupt real data on those two days a year. If ingest ever moves to
-  incremental/upsert (e.g. once a live data-pull library replaces manual
-  CSV drops), preserve this DST handling.
+  or corrupt real data on those two days a year. `load_from_smt()`
+  (`python3 -m smart_meter.ingest --from-smt [days_back]`, default 14 days)
+  pulls live from Smart Meter Texas via `smt_client.py` instead of a CSV,
+  scoped to a rolling window so it can be re-run daily to pick up SMT's
+  estimated->actual revisions without re-fetching all history; it deletes
+  and re-inserts only the affected `usage_date`s, preserving the same
+  full-day-reload DST safety per date. Both paths write the same schema and
+  are safe to interleave.
+- `smart_meter/smt_client.py` — thin wrapper around the community
+  `smart-meter-texas` package (pip dependency, see above) for Smart Meter
+  Texas's unofficial API. Reuses that package's `Account`/`Client`/
+  `ClientSSLContext` for auth, session/token handling, and its SSL
+  cert-chain workaround, but does NOT use its `Meter.get_15min()` — that
+  method only parses the "G" (solar Generation) record type from SMT's
+  `/adhoc/intervalsynch` response and silently returns `None` for a
+  consumption-only account. `smt_client._parse_energy_data()`
+  re-implements the same decoding targeting "C" (Consumption) instead.
+  ESIID is auto-discovered via `Account.fetch_meters()` each run rather
+  than hardcoded, consistent with the single-ESIID assumption below.
+  Credentials come only from `SMT_USERNAME`/`SMT_PASSWORD` env vars — see
+  `.env.example` — never hardcode or commit them; `.env` and `.venv/` are
+  gitignored.
 - `smart_meter/weather.py` — fetches Houston hourly temperature from
   Open-Meteo's free archive API (no key) in one HTTP call per date range,
   caches into `weather_hourly`. `ensure_weather()` only calls out when the
@@ -225,6 +251,56 @@ artifact, not a template rendered per-request.
     second chart that got folded away) but survives in the savings-note
     text and the table view. Bars for partial windows render at 45%
     opacity (`withAlpha()`) rather than being excluded.
+  - **Temperature vs. usage, by time of day** is eight small-multiple
+    scatter charts (`TOD_BUCKETS`, one per 3-hour window of the day, built
+    fresh as 8 `<canvas>`+`Chart` instances per render rather than static
+    markup — `tempScatterCharts` tracks them for `destroy()` on
+    re-render), each plotting one point per (date, window): that window's
+    average temperature (from `weather`, hourly so a 3h bucket always
+    averages exactly 3 readings) against that window's *summed* kWh/cost
+    (from `intervals`), computed entirely client-side in
+    `buildTodBucketData()` — nothing server-side precomputes this. All
+    eight panels share one x/y domain (computed once across all buckets'
+    points) so slope is visually comparable panel-to-panel; each panel
+    also gets its own dashed OLS trend line (`linregress()`, per-bucket)
+    with slope + R² as a one-line note under its title. The point: usage
+    during the free-night window should show a flatter slope than
+    afternoon/evening windows if free-night usage is habit-driven rather
+    than AC-driven — this chart is the direct test of that, which neither
+    the whole-day trend chart nor the week-over-week temp overlay
+    (time-aligned, not correlation-shaped) can show. This replaced an
+    earlier single-scatter version (`daily[].avgTempF`, one point per
+    *whole* day, split by weekday/weekend) that answered "does temp
+    predict usage" but not "at what time of day" — the weekday/weekend
+    split is gone now that time-of-day is the split. 8 series would blow
+    past the categorical palette's ~6-hue ceiling if drawn as one
+    multi-color chart, hence small multiples instead — and per-panel
+    `scales.x/y.title` is dropped in favor of one shared caption
+    (`#tempScatterAxisNote`) below the grid, a deliberate exception to the
+    "every chart carries an explicit axis title" rule for the same reason
+    the monthly chart gets a dual-axis exception:
+    eight repeated titles would be pure noise. The trend line is excluded
+    from tooltips via `tooltip.filter`, not by omitting a `label`
+    callback — returning `undefined` from a Chart.js label callback still
+    renders an (empty) tooltip row, it doesn't skip the entry. Dots are
+    colored per-point by calendar month (`monthColor()`, a fixed-order
+    per-panel `backgroundColor` function keyed on `ctx.raw.month`) to
+    surface seasonal hysteresis — whether the same temperature drives
+    different usage in, say, April vs. October. Month is a **cyclic**
+    variable (December is adjacent to January, not its opposite), so this
+    is deliberately a 12-step HSL hue wheel (`hslToHex()`, 30° apart,
+    fixed S/L per light/dark mode) rather than either a 12-color
+    categorical palette (would blow the ~6-hue pairwise-CVD ceiling) or a
+    single-hue sequential ramp (would wrongly imply Jan and Dec are
+    extremes rather than neighbors) — this is a distinct technique from
+    the "never rainbow" rule, which is about misrepresenting linear
+    magnitude, not phase/cyclic data. Consequence of that adjacency-by-
+    design: neighboring months (e.g. Nov/Dec, Jan/Feb) read as similar
+    hues, not maximally distinct — expected, not a bug, but means don't
+    "fix" it by re-spacing hues for max pairwise separation, that would
+    break the cyclic property. One shared legend (`renderMonthLegend()`,
+    `#tempScatterMonthLegend`, 12 fixed swatches Jan→Dec) renders once
+    above the grid rather than per-panel.
   - Every chart's y-axis carries an explicit `scales.y.title` (and `y1`
     for the monthly chart) naming the measurement and unit — `kWh` /
     `Cost ($)` via `unitAxisLabel()` for the toggleable charts,
@@ -285,7 +361,13 @@ for the day-over-day chart's x-axis.
 
 ## Planned future direction
 
-The CSV-drop workflow is a placeholder for a Python library that will pull
-SMT data automatically. When that lands, only `ingest.py`'s entry point
-changes (from reading a file to calling the library) — `cost.py`, `db.py`,
-and the dashboard generation are meant to stay untouched.
+The automatic SMT pull (`ingest.load_from_smt` / `smt_client.py`) now
+exists alongside the original CSV-drop workflow, as anticipated —
+`cost.py`, `db.py`, and the dashboard generation were untouched by it, per
+plan. Not yet built: wiring `load_from_smt` into a scheduled run (the
+Azure design settled on a Container Apps Job with a cron trigger, pulling
+to a DB persisted in Blob Storage and publishing `dashboard.html` to Blob
+static website hosting rather than an always-on server) and confirming the
+"C" record type's estimated/actual flag decoding against a real SMT
+response (currently mirrors the library's unverified "G"-type assumption —
+see `smt_client.py`).
